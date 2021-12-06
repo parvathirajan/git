@@ -401,7 +401,7 @@ test_expect_success 'checkout and reset --hard' '
 	test_all_match git reset --hard update-folder2
 '
 
-test_expect_success 'diff --staged' '
+test_expect_success 'diff --cached' '
 	init_repos &&
 
 	write_script edit-contents <<-\EOF &&
@@ -410,10 +410,10 @@ test_expect_success 'diff --staged' '
 	run_on_all ../edit-contents &&
 
 	test_all_match git diff &&
-	test_all_match git diff --staged &&
+	test_all_match git diff --cached &&
 	test_all_match git add README.md &&
 	test_all_match git diff &&
-	test_all_match git diff --staged
+	test_all_match git diff --cached
 '
 
 # NEEDSWORK: sparse-checkout behaves differently from full-checkout when
@@ -430,8 +430,8 @@ test_expect_success 'diff with renames and conflicts' '
 		test_all_match git checkout rename-base &&
 		test_all_match git checkout $branch -- . &&
 		test_all_match git status --porcelain=v2 &&
-		test_all_match git diff --staged --no-renames &&
-		test_all_match git diff --staged --find-renames || return 1
+		test_all_match git diff --cached --no-renames &&
+		test_all_match git diff --cached --find-renames || return 1
 	done
 '
 
@@ -450,8 +450,8 @@ test_expect_success 'diff with directory/file conflicts' '
 		test_all_match git checkout $branch &&
 		test_all_match git checkout rename-base -- . &&
 		test_all_match git status --porcelain=v2 &&
-		test_all_match git diff --staged --no-renames &&
-		test_all_match git diff --staged --find-renames || return 1
+		test_all_match git diff --cached --no-renames &&
+		test_all_match git diff --cached --find-renames || return 1
 	done
 '
 
@@ -472,43 +472,150 @@ test_expect_success 'log with pathspec outside sparse definition' '
 test_expect_success 'blame with pathspec inside sparse definition' '
 	init_repos &&
 
-	test_all_match git blame a &&
-	test_all_match git blame deep/a &&
-	test_all_match git blame deep/deeper1/a &&
-	test_all_match git blame deep/deeper1/deepest/a
+	for file in a \
+			deep/a \
+			deep/deeper1/a \
+			deep/deeper1/deepest/a
+	do
+		test_all_match git blame $file
+	done
 '
 
-# TODO: blame currently does not support blaming files outside of the
-# sparse definition. It complains that the file doesn't exist locally.
-test_expect_failure 'blame with pathspec outside sparse definition' '
+# Without a revision specified, blame will error if passed any file that
+# is not present in the working directory (even if the file is tracked).
+# Here we just verify that this is also true with sparse checkouts.
+test_expect_success 'blame with pathspec outside sparse definition' '
 	init_repos &&
+	test_sparse_match git sparse-checkout set &&
 
-	test_all_match git blame folder1/a &&
-	test_all_match git blame folder2/a &&
-	test_all_match git blame deep/deeper2/a &&
-	test_all_match git blame deep/deeper2/deepest/a
+	for file in a \
+			deep/a \
+			deep/deeper1/a \
+			deep/deeper1/deepest/a
+	do
+		test_sparse_match test_must_fail git blame $file &&
+		cat >expect <<-EOF &&
+		fatal: Cannot lstat '"'"'$file'"'"': No such file or directory
+		EOF
+		# We compare sparse-checkout-err and sparse-index-err in
+		# `test_sparse_match`. Given we know they are the same, we
+		# only check the content of sparse-index-err here.
+		test_cmp expect sparse-index-err
+	done
 '
 
-# NEEDSWORK: a sparse-checkout behaves differently from a full checkout
-# in this scenario, but it shouldn't.
-test_expect_failure 'checkout and reset (mixed)' '
+test_expect_success 'checkout and reset (mixed)' '
 	init_repos &&
 
 	test_all_match git checkout -b reset-test update-deep &&
 	test_all_match git reset deepest &&
-	test_all_match git reset update-folder1 &&
-	test_all_match git reset update-folder2
+
+	# Because skip-worktree is preserved, resetting to update-folder1
+	# will show worktree changes for folder1/a in full-checkout, but not
+	# in sparse-checkout or sparse-index.
+	git -C full-checkout reset update-folder1 >full-checkout-out &&
+	test_sparse_match git reset update-folder1 &&
+	grep "M	folder1/a" full-checkout-out &&
+	! grep "M	folder1/a" sparse-checkout-out &&
+	run_on_sparse test_path_is_missing folder1
 '
 
-# NEEDSWORK: a sparse-checkout behaves differently from a full checkout
-# in this scenario, but it shouldn't.
-test_expect_success 'checkout and reset (mixed) [sparse]' '
+test_expect_success 'checkout and reset (merge)' '
 	init_repos &&
 
-	test_sparse_match git checkout -b reset-test update-deep &&
-	test_sparse_match git reset deepest &&
-	test_sparse_match git reset update-folder1 &&
-	test_sparse_match git reset update-folder2
+	write_script edit-contents <<-\EOF &&
+	echo text >>$1
+	EOF
+
+	test_all_match git checkout -b reset-test update-deep &&
+	run_on_all ../edit-contents a &&
+	test_all_match git reset --merge deepest &&
+	test_all_match git status --porcelain=v2 &&
+
+	test_all_match git reset --hard update-deep &&
+	run_on_all ../edit-contents deep/a &&
+	test_all_match test_must_fail git reset --merge deepest
+'
+
+test_expect_success 'checkout and reset (keep)' '
+	init_repos &&
+
+	write_script edit-contents <<-\EOF &&
+	echo text >>$1
+	EOF
+
+	test_all_match git checkout -b reset-test update-deep &&
+	run_on_all ../edit-contents a &&
+	test_all_match git reset --keep deepest &&
+	test_all_match git status --porcelain=v2 &&
+
+	test_all_match git reset --hard update-deep &&
+	run_on_all ../edit-contents deep/a &&
+	test_all_match test_must_fail git reset --keep deepest
+'
+
+test_expect_success 'reset with pathspecs inside sparse definition' '
+	init_repos &&
+
+	write_script edit-contents <<-\EOF &&
+	echo text >>$1
+	EOF
+
+	test_all_match git checkout -b reset-test update-deep &&
+	run_on_all ../edit-contents deep/a &&
+
+	test_all_match git reset base -- deep/a &&
+	test_all_match git status --porcelain=v2 &&
+
+	test_all_match git reset base -- nonexistent-file &&
+	test_all_match git status --porcelain=v2 &&
+
+	test_all_match git reset deepest -- deep &&
+	test_all_match git status --porcelain=v2
+'
+
+# Although the working tree differs between full and sparse checkouts after
+# reset, the state of the index is the same.
+test_expect_success 'reset with pathspecs outside sparse definition' '
+	init_repos &&
+	test_all_match git checkout -b reset-test base &&
+
+	test_sparse_match git reset update-folder1 -- folder1 &&
+	git -C full-checkout reset update-folder1 -- folder1 &&
+	test_sparse_match git status --porcelain=v2 &&
+	test_all_match git rev-parse HEAD:folder1 &&
+
+	test_sparse_match git reset update-folder2 -- folder2/a &&
+	git -C full-checkout reset update-folder2 -- folder2/a &&
+	test_sparse_match git status --porcelain=v2 &&
+	test_all_match git rev-parse HEAD:folder2/a
+'
+
+test_expect_success 'reset with wildcard pathspec' '
+	init_repos &&
+
+	test_all_match git reset update-deep -- deep\* &&
+	test_all_match git ls-files -s -- deep &&
+
+	test_all_match git reset deepest -- deep\*\*\* &&
+	test_all_match git ls-files -s -- deep &&
+
+	# The following `git reset`s result in updating the index on files with
+	# `skip-worktree` enabled. To avoid failing due to discrepencies in reported
+	# "modified" files, `test_sparse_match` reset is performed separately from
+	# "full-checkout" reset, then the index contents of all repos are verified.
+
+	test_sparse_match git reset update-folder1 -- \*/a &&
+	git -C full-checkout reset update-folder1 -- \*/a &&
+	test_all_match git ls-files -s -- deep/a folder1/a &&
+
+	test_sparse_match git reset update-folder2 -- folder\* &&
+	git -C full-checkout reset update-folder2 -- folder\* &&
+	test_all_match git ls-files -s -- folder10 folder1 folder2 &&
+
+	test_sparse_match git reset base -- folder1/\* &&
+	git -C full-checkout reset base -- folder1/\* &&
+	test_all_match git ls-files -s -- folder1
 '
 
 test_expect_success 'merge, cherry-pick, and rebase' '
@@ -685,11 +792,15 @@ test_expect_success 'submodule handling' '
 	grep "160000 commit $(git -C initial-repo rev-parse HEAD)	modules/sub" cache
 '
 
+# When working with a sparse index, some commands will need to expand the
+# index to operate properly. If those commands also write the index back
+# to disk, they need to convert the index to sparse before writing.
+# This test verifies that both of these events are logged in trace2 logs.
 test_expect_success 'sparse-index is expanded and converted back' '
 	init_repos &&
 
 	GIT_TRACE2_EVENT="$(pwd)/trace2.txt" GIT_TRACE2_EVENT_NESTING=10 \
-		git -C sparse-index -c core.fsmonitor="" reset --hard &&
+		git -C sparse-index reset -- folder1/a &&
 	test_region index convert_to_sparse trace2.txt &&
 	test_region index ensure_full_index trace2.txt
 '
@@ -726,9 +837,9 @@ test_expect_success 'sparse-index is not expanded' '
 	ensure_not_expanded checkout - &&
 	ensure_not_expanded switch rename-out-to-out &&
 	ensure_not_expanded switch - &&
-	git -C sparse-index reset --hard &&
+	ensure_not_expanded reset --hard &&
 	ensure_not_expanded checkout rename-out-to-out -- deep/deeper1 &&
-	git -C sparse-index reset --hard &&
+	ensure_not_expanded reset --hard &&
 	ensure_not_expanded restore -s rename-out-to-out -- deep/deeper1 &&
 
 	echo >>sparse-index/README.md &&
@@ -737,6 +848,34 @@ test_expect_success 'sparse-index is not expanded' '
 	ensure_not_expanded add extra.txt &&
 	echo >>sparse-index/untracked.txt &&
 	ensure_not_expanded add . &&
+
+	for ref in update-deep update-folder1 update-folder2 update-deep
+	do
+		echo >>sparse-index/README.md &&
+		ensure_not_expanded reset --hard $ref || return 1
+	done &&
+
+	ensure_not_expanded reset --mixed base &&
+	ensure_not_expanded reset --hard update-deep &&
+	ensure_not_expanded reset --keep base &&
+	ensure_not_expanded reset --merge update-deep &&
+	ensure_not_expanded reset --hard &&
+
+	ensure_not_expanded reset base -- deep/a &&
+	ensure_not_expanded reset base -- nonexistent-file &&
+	ensure_not_expanded reset deepest -- deep &&
+
+	# Although folder1 is outside the sparse definition, it exists as a
+	# directory entry in the index, so the pathspec will not force the
+	# index to be expanded.
+	ensure_not_expanded reset deepest -- folder1 &&
+	ensure_not_expanded reset deepest -- folder1/ &&
+
+	# Wildcard identifies only in-cone files, no index expansion
+	ensure_not_expanded reset deepest -- deep/\* &&
+
+	# Wildcard identifies only full sparse directories, no index expansion
+	ensure_not_expanded reset deepest -- folder\* &&
 
 	ensure_not_expanded checkout -f update-deep &&
 	test_config -C sparse-index pull.twohead ort &&
@@ -765,6 +904,64 @@ test_expect_success 'sparse-index is not expanded: merge conflict in cone' '
 		git -C sparse-index config pull.twohead ort &&
 		ensure_not_expanded ! merge -m merged expand-right
 	)
+'
+
+test_expect_success 'sparse index is not expanded: diff' '
+	init_repos &&
+
+	write_script edit-contents <<-\EOF &&
+	echo text >>$1
+	EOF
+
+	# Add file within cone
+	test_sparse_match git sparse-checkout set deep &&
+	run_on_all ../edit-contents deep/testfile &&
+	test_all_match git add deep/testfile &&
+	run_on_all ../edit-contents deep/testfile &&
+
+	test_all_match git diff &&
+	test_all_match git diff --cached &&
+	ensure_not_expanded diff &&
+	ensure_not_expanded diff --cached &&
+
+	# Add file outside cone
+	test_all_match git reset --hard &&
+	run_on_all mkdir newdirectory &&
+	run_on_all ../edit-contents newdirectory/testfile &&
+	test_sparse_match git sparse-checkout set newdirectory &&
+	test_all_match git add newdirectory/testfile &&
+	run_on_all ../edit-contents newdirectory/testfile &&
+	test_sparse_match git sparse-checkout set &&
+
+	test_all_match git diff &&
+	test_all_match git diff --cached &&
+	ensure_not_expanded diff &&
+	ensure_not_expanded diff --cached &&
+
+	# Merge conflict outside cone
+	# The sparse checkout will report a warning that is not in the
+	# full checkout, so we use `run_on_all` instead of
+	# `test_all_match`
+	run_on_all git reset --hard &&
+	test_all_match git checkout merge-left &&
+	test_all_match test_must_fail git merge merge-right &&
+
+	test_all_match git diff &&
+	test_all_match git diff --cached &&
+	ensure_not_expanded diff &&
+	ensure_not_expanded diff --cached
+'
+
+test_expect_success 'sparse index is not expanded: blame' '
+	init_repos &&
+
+	for file in a \
+			deep/a \
+			deep/deeper1/a \
+			deep/deeper1/deepest/a
+	do
+		ensure_not_expanded blame $file
+	done
 '
 
 # NEEDSWORK: a sparse-checkout behaves differently from a full checkout
