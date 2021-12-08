@@ -187,6 +187,10 @@ Both the <eolinfo> in the index ("i/<eolinfo>")
 and in the working tree ("w/<eolinfo>") are shown for regular files,
 followed by the  ("attr/<eolattr>").
 
+--sparse::
+	If the index is sparse, show the sparse directories without expanding
+	to the contained files.
+
 \--::
 	Do not interpret any more arguments as options.
 
